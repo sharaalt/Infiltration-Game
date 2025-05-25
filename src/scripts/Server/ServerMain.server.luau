@@ -33,7 +33,7 @@ local function BindScriptsToPartsPromise()
 
 		for _, v in pairs(Workspace:GetDescendants()) do
 			if v:HasTag("Enemy") then
-				local guardController = GuardClass.new(v, PathfindingService, LOService)
+				local guardController = GuardClass.new(v, PathfindingService, LOService, v.Waypoints:GetDescendants())
 				table.insert(activeClasses, guardController)
 				print(
 					string.format(
@@ -63,14 +63,14 @@ local function BindScriptsToPartsPromise()
 
 		local endTime = os.clock()
 		local duration = endTime - startTime
-		res(string.format("-- [Server Main] Binded scripts to parts in %.5f seconds --", duration))
+		res(string.format("-- [Server Main] Binded scripts to parts in %.2f seconds --", duration))
 	end)
 end
 
 BindScriptsToPartsPromise():andThen(print):catch(warn):await()
 
 for _, v in pairs(activeClasses) do
-	v:Start()
+	v:StartUpdate()
 end
 
 game:BindToClose(function()

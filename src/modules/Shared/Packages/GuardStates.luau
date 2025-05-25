@@ -4,7 +4,13 @@
 
 local GuardStates = {}
 
+local require = require(script.Parent.loader).load(script)
+
+local Maid = require("Maid")
+
 function GuardStates.Idle(guard)
+	local stateMaid = Maid.new()
+
 	return {
 		Name = "Idle",
 		OnEnter = function()
@@ -13,33 +19,36 @@ function GuardStates.Idle(guard)
 			guard._walkAnim:Stop()
 		end,
 		OnExecute = function()
-			print("Idling")
-			task.wait(1)
+			print(string.format("Idling %c", guard._currentPlayer.Character.Humanoid.Health))
+			guard._currentPlayer.Character.Humanoid.Health = guard._currentPlayer.Character.Humanoid.Health - 10
 		end,
 		OnExit = function()
 			print("Done idling")
+			guard._idleAnim:Stop()
 		end,
 	}
 end
 
 function GuardStates.Patrol(guard)
+	local stateMaid = Maid.new()
+	local patrolLoopTask = nil
+
 	return {
 		Name = "Patrol",
 		OnEnter = function()
+			patrolLoopTask = task.spawn(function()
+				local task = guard:MoveGuard(guard._waypoints)
+
+				if task then
+					guard.PatrolCompleted:Fire()
+				end
+			end)
 			print("Starting patrol")
 		end,
-		OnExecute = function()
-			print(guard._waypoints)
-			-- for _, waypoint in ipairs(guard._waypoints) do
-			-- 	guard._walkAnim:Play()
-			-- 	guard._idleAnim:Stop()
-			-- 	guard._Humanoid:MoveTo(waypoint.Position)
-			-- 	guard._Humanoid.MoveToFinished:Wait()
-			-- 	guard._idleAnim:Play()
-			-- 	guard._walkAnim:Stop()
-			-- end
-		end,
+		OnExecute = function() end,
 		OnExit = function()
+			stateMaid:DoCleaning()
+			patrolLoopTask = nil
 			print("Done patrolling.")
 		end,
 	}
@@ -49,16 +58,20 @@ function GuardStates.Chase(guard)
 	return {
 		Name = "Chase",
 		OnEnter = function()
-			print("Starting patrol")
+			print("Starting chase")
 		end,
 		OnExecute = function()
-			print(guard._currentPlayer)
-			guard
-				:RequestNewPath(guard._currentPlayer.Character.HumanoidRootPart.Position)
-				:andThen(function(val)
-					guard:MoveGuard(val)
-				end)
-				:catch(warn)
+			if guard._currentState.Name ~= "Idle" then
+				guard
+					:RequestNewPath(guard._currentPlayer.Character.HumanoidRootPart.Position)
+					:andThen(function(val)
+						guard:MoveGuard(val)
+					end)
+					:catch(warn)
+					:await()
+			else
+				return
+			end
 		end,
 		OnExit = function()
 			print("Done chasing.")

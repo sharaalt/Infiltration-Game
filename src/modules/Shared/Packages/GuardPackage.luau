@@ -18,7 +18,7 @@ local GuardClass = setmetatable({}, BaseObject)
 GuardClass.ClassName = "GuardClass"
 GuardClass.__index = GuardClass
 
-function GuardClass.new(Guard, PathfindingService, lineOfSight)
+function GuardClass.new(Guard, PathfindingService, lineOfSight, Waypoints)
 	local self = setmetatable(BaseObject.new(), GuardClass)
 
 	-- Defenitions
@@ -29,17 +29,23 @@ function GuardClass.new(Guard, PathfindingService, lineOfSight)
 	self._humanoid = self._guard.Humanoid
 	self._waypoints = self._guard.Waypoints
 	self._animator.Parent = self._humanoid
+	self._waypoints = Waypoints
+
+	-- Dynamic Variables
+	self._currentPlayer = nil
 
 	-- Signals
-	self.PathCompleted = Signal.new()
+	self.PatrolCompleted = Signal.new()
 	self.PlayerSpotted = Signal.new()
 	self.PlayerLost = Signal.new()
+	self.InRange = Signal.new()
 
 	-- Services
 	self._maid = Maid.new()
-	self._pathfindingService = assert(PathfindingService, "No pathfindingservice")
+	self._pathfindingService = assert(PathfindingService, "[Guard Controller] - No pathfindingservice")
 	self._lineOfSight = assert(lineOfSight, "[Guard Controller] - No LOS Service")
 
+	-- Create animations
 	local IdleAnimId = "http://www.roblox.com/asset/?id=180435571"
 	local WalkAnimId = "http://www.roblox.com/asset/?id=180426354"
 	local IdleAnim = Instance.new("Animation")
@@ -63,31 +69,44 @@ function GuardClass.new(Guard, PathfindingService, lineOfSight)
 		Chase = stateMachine.Chase(self),
 	}
 
-	self._maid:GiveTask(self.PathCompleted:Connect(function()
-		if self._currentState then
-			self._currentState.OnExit()
-			self._currentState = "Idle"
-			self._currentState.OnEnter()
+	local initalState = self._states.Patrol
+	initalState.OnEnter()
+
+	self:SetState(self._states.Patrol)
+
+	self._maid:GiveTask(self.PatrolCompleted:Connect(function()
+		if self._currentState.Name == "Patrol" then
+			self:SetState(self._states.Idle)
 		end
 	end))
 
-	self._maid:GiveTask(self.PlayerSpotted:Connect(function()
-		if self._currentState then
-			self._currentState.OnExit()
-			self._currentState = "Chase"
-			self._currentState.OnEnter()
-		end
+	self._maid:GiveTask(self.InRange:Connect(function()
+		self:SetState(self._states.Idle)
+	end))
+
+	self._maid:GiveTask(self.PlayerSpotted:Connect(function(player)
+		self:SetState(self._states.Chase, player)
 	end))
 
 	self._maid:GiveTask(self.PlayerLost:Connect(function()
-		if self._currentState then
-			self._currentState.OnExit()
-			self._currentState = "Idle"
-			self._currentState.OnEnter()
-		end
+		self:SetState(self._states.Patrol)
 	end))
 
 	return self
+end
+
+function GuardClass:SetState(state, ...)
+	if self._currentState == state then
+		warn(string.format("[Guard Controller] The current state is already %q!", state.Name))
+		return
+	end
+
+	if self._currentState then
+		self._currentState:OnExit()
+	end
+
+	self._currentState = state
+	self._currentState:OnEnter(...)
 end
 
 function GuardClass:_ExecuteCurrentState()
@@ -102,11 +121,11 @@ function GuardClass:_CheckLineOfSight(player)
 	end
 	local closestDistance = 20
 
-	local character = player.Character or player.CharacterAdded:Wait()
+	local character = player.Character
 	if character and character:FindFirstChild("HumanoidRootPart") then
 		local result = false
 
-		local distance = (self._guard.HumanoidRootPart.Position - character.HumanoidRootPart.Position).Magnitude
+		local distance = (self._guard:WaitForChild("HumanoidRootPart").Position - character.HumanoidRootPart.Position).Magnitude
 		local direction = (character.HumanoidRootPart.Position - self._guard.HumanoidRootPart.Position)
 		local raycastParams = RaycastParams.new()
 		raycastParams.FilterDescendantsInstances = { self._guard }
@@ -118,7 +137,6 @@ function GuardClass:_CheckLineOfSight(player)
 				result = succ
 			end)
 			:catch(warn)
-			:await()
 
 		if distance < closestDistance and result then
 			return player
@@ -128,52 +146,70 @@ function GuardClass:_CheckLineOfSight(player)
 	end
 end
 
-function GuardClass:Start()
-	-- This creates a dedicated thread for THIS guard's AI loop
-	task.spawn(function()
-		self:Update() -- Clean up if guard is removed
-	end)
+function GuardClass:StartUpdate()
+	self._maid:GiveTask(task.spawn(function()
+		self:Update()
+	end))
 end
 
 function GuardClass:Update()
-	while true do
-		task.wait(0.2)
-		local closestPlayer
+	return Promise.new(function(res, err)
+		local timer = 0
 
-		-- === Phase 1 Info Gathering === --
-		-- To-Do: Use work octrees to fix performance bottleneck not need right now.
-		for _, player in (Players:GetPlayers()) do
-			if player then
-				local hasSight = self:_CheckLineOfSight(player)
+		while true do
+			task.wait(0.2)
+			local closestPlayer
 
-				if hasSight then
-					closestPlayer = hasSight
-					self.PlayerSpotted:Fire()
+			-- === Phase 1 Info Gathering === --
+			-- To-Do: Use work octrees to fix performance bottleneck not need right now.
+			for _, player in (Players:GetPlayers()) do
+				if player then
+					local hasSight = self:_CheckLineOfSight(player)
+
+					if hasSight then
+						closestPlayer = hasSight
+						self._currentPlayer = player
+					end
 				end
 			end
 
-			print(closestPlayer)
-		end
+			-- === Phase 2 Decide === --
+			-- To-Do: N/A --
+			if closestPlayer then
+				timer += 1
+				timer = math.clamp(timer, 0, 5)
 
-		-- === Phase 2 Decide === --
-		-- To-Do: N/A --
-		if closestPlayer then
-			if self._currentState ~= "Chase" then
-				self.PlayerSpotted:Fire()
+				if self._currentState.Name ~= "Chase" and timer >= 3 then
+					self.PlayerSpotted:Fire(closestPlayer)
+				end
+			else
+				timer -= 1
+				timer = math.clamp(timer, 0, 5)
+
+				if self._currentState.Name == "Chase" and timer == 0 then
+					self.PlayerLost:Fire()
+					self._currentPlayer = nil
+				end
+
+				if self._currentState.Name == "Idle" and timer == 0 then
+					self:SetState(self._states.Patrol)
+					self._currentPlayer = nil
+				end
 			end
-		end
 
-		-- === Phase 3 Act === --
-		-- To-Do: N/A --
-		self:_ExecuteCurrentState()
-	end
+			print(timer)
+
+			-- === Phase 3 Act === --
+			-- To-Do: N/A --
+			self:_ExecuteCurrentState()
+		end
+	end)
 end
 
-function GuardClass:_RequestNewPath(destination: Vector3)
+function GuardClass:RequestNewPath(destination: Vector3)
 	return Promise.new(function(succ)
-		self
-			._pathfindingService
-			:FindPath(self._guard.PrimaryPart.Position, destination) -- Access a service "Pathfinding Service"
+		self._pathfindingService
+			:FindPath(self._guard.PrimaryPart.Position, destination)
 			:andThen(function(val)
 				succ(val)
 			end)
@@ -183,17 +219,52 @@ function GuardClass:_RequestNewPath(destination: Vector3)
 end
 
 function GuardClass:MoveGuard(Waypoints: table)
-	for _, waypoint in Waypoints do
-		self._walkAnim:Play()
-		self._idleAnim:Stop()
+	local startingState = self._currentState
 
-		self._humanoid:MoveTo(waypoint.Position)
-		self._humanoid.MoveToFinished:Wait()
+	self._walkAnim:Play()
+	self._idleAnim:Stop()
 
-		self._walkAnim:Stop()
-		self._idleAnim:Play()
+	if self._currentState.Name == "Idle" then
+		print("[Guard Controller] State changed breaking loop.")
+		self._humanoid:MoveTo(self._guard.PrimaryPart.Position)
+		return
+	else
+		for _, waypoint in ipairs(Waypoints) do
+			if self._currentState ~= startingState then
+				print(
+					string.format(
+						"[Guard Controller] State changed during MoveGuard loop (to: %q) breaking.",
+						self._currentState.Name
+					)
+				)
+
+				self._humanoid:MoveTo(self._guard.PrimaryPart.Position)
+				self._walkAnim:Stop()
+				self._idleAnim:Play()
+				break -- Exit the for loop
+			end
+
+			if self._currentPlayer and self._currentState.Name == "Chase" then
+				local distance = (
+					self._guard:WaitForChild("HumanoidRootPart").Position
+					- self._currentPlayer.Character.HumanoidRootPart.Position
+				).Magnitude
+
+				if distance < 5.5 then
+					self.InRange:Fire()
+					self._walkAnim:Stop()
+					self._idleAnim:Play()
+					break
+				end
+			end
+
+			self._humanoid:MoveTo(waypoint.Position)
+			self._humanoid.MoveToFinished:Wait()
+		end
 	end
 
+	self._walkAnim:Stop()
+	self._idleAnim:Play()
 	return true
 end
 
