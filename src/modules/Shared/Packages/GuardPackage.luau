@@ -33,6 +33,7 @@ function GuardClass.new(Guard, PathfindingService, lineOfSight, Waypoints)
 
 	-- Dynamic Variables
 	self._currentPlayer = nil
+	self._updateThread = nil
 
 	-- Signals
 	self.PatrolCompleted = Signal.new()
@@ -68,11 +69,6 @@ function GuardClass.new(Guard, PathfindingService, lineOfSight, Waypoints)
 		Patrol = stateMachine.Patrol(self),
 		Chase = stateMachine.Chase(self),
 	}
-
-	local initalState = self._states.Patrol
-	initalState.OnEnter()
-
-	self:SetState(self._states.Patrol)
 
 	self._maid:GiveTask(self.PatrolCompleted:Connect(function()
 		if self._currentState.Name == "Patrol" then
@@ -146,64 +142,86 @@ function GuardClass:_CheckLineOfSight(player)
 	end
 end
 
+function GuardClass:_PlayerCheck()
+	local maxdistance = 50
+
+	local playerRadius = {}
+
+	for _, player in (Players:GetPlayers()) do
+		local character = player.Character
+		if character then
+			local distance = (self._guard.HumanoidRootPart.Position - character.HumanoidRootPart.Position).Magnitude
+
+			if distance <= maxdistance then
+				table.insert(playerRadius, player)
+			end
+		end
+	end
+
+	return playerRadius
+end
+
 function GuardClass:StartUpdate()
-	self._maid:GiveTask(task.spawn(function()
+	self._updateThread = coroutine.create(function()
 		self:Update()
-	end))
+	end)
+	coroutine.resume(self._updateThread)
+	self:SetState(self._states.Patrol)
 end
 
 function GuardClass:Update()
-	return Promise.new(function(res, err)
-		local timer = 0
+	local timer = 0
 
-		while true do
-			task.wait(0.2)
-			local closestPlayer
+	while true do
+		task.wait(0.2)
+		local closestPlayer
 
-			-- === Phase 1 Info Gathering === --
-			-- To-Do: Use work octrees to fix performance bottleneck not need right now.
-			for _, player in (Players:GetPlayers()) do
-				if player then
-					local hasSight = self:_CheckLineOfSight(player)
+		-- === Phase 1 Info Gathering === --
+		-- To-Do: Use work octrees to fix performance bottleneck not need right now.
+		local players = self:_PlayerCheck()
 
-					if hasSight then
-						closestPlayer = hasSight
-						self._currentPlayer = player
-					end
-				end
+		for _, player in players do
+			local lineOfSight = self:_CheckLineOfSight(player)
+
+			if lineOfSight then
+				closestPlayer = player
+				self._currentPlayer = player
+				break
 			end
-
-			-- === Phase 2 Decide === --
-			-- To-Do: N/A --
-			if closestPlayer then
-				timer += 1
-				timer = math.clamp(timer, 0, 5)
-
-				if self._currentState.Name ~= "Chase" and timer >= 3 then
-					self.PlayerSpotted:Fire(closestPlayer)
-				end
-			else
-				timer -= 1
-				timer = math.clamp(timer, 0, 5)
-
-				if self._currentState.Name == "Chase" and timer == 0 then
-					self.PlayerLost:Fire()
-					self._currentPlayer = nil
-				end
-
-				if self._currentState.Name == "Idle" and timer == 0 then
-					self:SetState(self._states.Patrol)
-					self._currentPlayer = nil
-				end
-			end
-
-			print(timer)
-
-			-- === Phase 3 Act === --
-			-- To-Do: N/A --
-			self:_ExecuteCurrentState()
 		end
-	end)
+
+		print(closestPlayer)
+
+		-- === Phase 2 Decide === --
+		-- To-Do: N/A --
+		if closestPlayer then
+			timer += 1
+			timer = math.clamp(timer, 0, 5)
+
+			if self._currentState.Name ~= "Chase" and timer >= 3 then
+				self.PlayerSpotted:Fire(closestPlayer)
+			end
+		else
+			timer -= 1
+			timer = math.clamp(timer, 0, 5)
+
+			if self._currentState.Name == "Chase" and timer == 0 then
+				self.PlayerLost:Fire()
+				self._currentPlayer = nil
+			end
+
+			if self._currentState.Name == "Idle" and timer == 0 then
+				self:SetState(self._states.Patrol)
+				self._currentPlayer = nil
+			end
+		end
+
+		print(timer)
+
+		-- === Phase 3 Act === --
+		-- To-Do: N/A --
+		self:_ExecuteCurrentState()
+	end
 end
 
 function GuardClass:RequestNewPath(destination: Vector3)
